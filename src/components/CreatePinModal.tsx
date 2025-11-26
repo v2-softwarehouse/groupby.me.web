@@ -31,6 +31,7 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
   const autocompleteServiceRef = useRef<google.maps.places.AutocompleteService | null>(null);
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
   const [mapsError, setMapsError] = useState<string | null>(null);
+  const [mapsStatus, setMapsStatus] = useState<'idle' | 'ready' | 'error'>('idle');
   const [predictions, setPredictions] = useState<{ placeId: string; mainText: string; secondaryText?: string }[]>([]);
   const [isFetchingPredictions, setIsFetchingPredictions] = useState(false);
   const sessionTokenRef = useRef<string>(crypto.randomUUID());
@@ -77,12 +78,16 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
   // Simulate Google Places API search
   useEffect(() => {
     if (!apiKey) {
+      setMapsStatus('error');
       setMapsError('Configure VITE_GOOGLE_MAPS_API_KEY com acesso ao Places API (New).');
+      return;
     }
+    setMapsStatus('ready');
+    setMapsError(null);
   }, [apiKey]);
 
   useEffect(() => {
-    if (!apiKey) return;
+    if (!apiKey || mapsStatus !== 'ready') return;
     if (!searchAddress || searchAddress.length < 3) {
       setPredictions([]);
       return;
@@ -93,12 +98,12 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
 
     const fetchPredictions = async () => {
       try {
-        const response = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+        const response = await fetch(`https://places.googleapis.com/v1/places:autocomplete?key=${apiKey}`, {
           method: 'POST',
+          mode: 'cors',
           signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
             'X-Goog-FieldMask': 'predictions.placeId,predictions.text',
             'X-Goog-Session-Token': sessionTokenRef.current,
           },
@@ -136,15 +141,14 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
       controller.abort();
       window.clearTimeout(timeoutId);
     };
-  }, [apiKey, searchAddress]);
+  }, [apiKey, searchAddress, mapsStatus]);
 
   const handlePredictionSelect = async (prediction: { placeId: string; mainText: string; secondaryText?: string }) => {
     if (!apiKey) return;
     try {
-      const response = await fetch(`https://places.googleapis.com/v1/places/${prediction.placeId}`, {
+      const response = await fetch(`https://places.googleapis.com/v1/places/${prediction.placeId}?key=${apiKey}`, {
         method: 'GET',
         headers: {
-          'X-Goog-Api-Key': apiKey,
           'X-Goog-FieldMask': 'id,displayName,formattedAddress,location',
           'X-Goog-Session-Token': sessionTokenRef.current,
         },
@@ -342,7 +346,7 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
                 <div className="mt-3 border border-gray-200 rounded-lg divide-y max-h-48 overflow-y-auto bg-white shadow-sm">
                   {predictions.map((prediction) => (
                     <button
-                      key={prediction.place_id}
+                      key={prediction.placeId}
                       type="button"
                       className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-start gap-3"
                       onClick={() => handlePredictionSelect(prediction)}
@@ -350,10 +354,10 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
                       <MapPin className="w-5 h-5 text-green-600 mt-0.5" />
                       <div>
                         <div className="text-gray-900 text-sm font-medium">
-                          {prediction.structured_formatting.main_text}
+                          {prediction.mainText}
                         </div>
                         <div className="text-xs text-gray-600">
-                          {prediction.structured_formatting.secondary_text}
+                          {prediction.secondaryText}
                         </div>
                       </div>
                     </button>

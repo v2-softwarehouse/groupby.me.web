@@ -5,6 +5,10 @@
 
   export default defineConfig({
     plugins: [react()],
+    optimizeDeps: {
+      include: ['react', 'react-dom'],
+      dedupe: ['react', 'react-dom'],
+    },
     resolve: {
       extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
       alias: {

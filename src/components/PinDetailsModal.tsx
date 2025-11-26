@@ -10,9 +10,10 @@ interface PinDetailsModalProps {
   pin: Pin;
   onStartChat: (withInterest?: { products: any[], services: any[] }) => void;
   isLoggedIn: boolean;
+  onLogin: () => void;
 }
 
-export function PinDetailsModal({ isOpen, onClose, pin, onStartChat, isLoggedIn }: PinDetailsModalProps) {
+export function PinDetailsModal({ isOpen, onClose, pin, onStartChat, isLoggedIn, onLogin }: PinDetailsModalProps) {
   const [selectedProducts, setSelectedProducts] = useState<{[key: string]: number}>({});
   const [selectedServices, setSelectedServices] = useState<{[key: string]: boolean}>({});
   const [showCart, setShowCart] = useState(false);
@@ -338,7 +339,7 @@ export function PinDetailsModal({ isOpen, onClose, pin, onStartChat, isLoggedIn 
           ) : (
             <div className="text-center">
               <p className="text-gray-600 mb-3">Faça login para {getTotalItems() > 0 ? 'enviar seu interesse e ' : ''}iniciar uma conversa</p>
-              <Button className="bg-blue-600 hover:bg-blue-700">
+              <Button className="bg-blue-600 hover:bg-blue-700" onClick={onLogin}>
                 Entrar ou criar conta
               </Button>
             </div>

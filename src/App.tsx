@@ -8,7 +8,12 @@ import { NotificationPanel } from './components/NotificationPanel';
 import { RewardsPanel } from './components/RewardsPanel';
 import { ModerationPanel } from './components/ModerationPanel';
 import { PinManagement } from './components/PinManagement';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { collection, doc, onSnapshot, addDoc, updateDoc, serverTimestamp, increment } from 'firebase/firestore';
+import { ref, onValue, runTransaction, serverTimestamp as rtdbServerTimestamp, set } from 'firebase/database';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { AuthModal } from './components/AuthModal';
+import { firestore, realtimeDb, firebaseAuth } from './firebase';
 
 export interface Pin {
   id: string;
@@ -56,75 +61,110 @@ export default function App() {
   const [isModerationOpen, setIsModerationOpen] = useState(false);
   const [currentInterest, setCurrentInterest] = useState<{ products: any[], services: any[] } | undefined>(undefined);
   const [showPinManagement, setShowPinManagement] = useState(false);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const statsUnsubRef = useRef<Record<string, () => void>>({});
 
-  const [pins, setPins] = useState<Pin[]>([
-    {
-      id: '1',
-      type: 'business',
-      name: 'Farmácia Central',
-      lat: -23.550520,
-      lng: -46.633308,
-      address: 'Av. Paulista, 1000',
-      createdBy: 'farmacia_central',
-      createdAt: new Date('2024-01-15'),
-      description: 'Farmácia 24h com delivery rápido',
-      businessInfo: {
-        cnpj: '12.345.678/0001-90',
-        phone: '(11) 98765-4321',
-        email: 'contato@farmaciacentral.com.br',
-        website: 'www.farmaciacentral.com.br',
-        hours: '24 horas',
-        categories: ['Saúde', 'Farmácia', 'Delivery'],
-        products: ['Medicamentos', 'Cosméticos', 'Higiene'],
-        services: ['Delivery', 'Teste de COVID-19', 'Aferição de Pressão'],
-      },
-      stats: { views: 1250, chatsStarted: 89, messages: 456 },
-      reported: false,
-    },
-    {
-      id: '2',
-      type: 'public',
-      name: 'Hospital Municipal',
-      lat: -23.548520,
-      lng: -46.635308,
-      address: 'Rua Augusta, 500',
-      createdBy: 'prefeitura_sp',
-      createdAt: new Date('2024-01-10'),
-      description: 'Atendimento 24h - Emergência e pronto-socorro',
-      businessInfo: {
-        phone: '(11) 3000-0000',
-        email: 'hospital@prefeitura.sp.gov.br',
-        hours: '24 horas',
-        categories: ['Saúde Pública', 'Emergência', 'Hospital'],
-        services: ['Pronto-Socorro', 'Clínico Geral', 'Pediatria', 'Raio-X'],
-      },
-      stats: { views: 3420, chatsStarted: 1247, messages: 8934 },
-      reported: false,
-    },
-    {
-      id: '3',
-      type: 'personal',
-      name: 'Grupo: Rua das Flores',
-      lat: -23.552520,
-      lng: -46.631308,
-      address: 'Rua das Flores',
-      createdBy: 'joao_silva',
-      createdAt: new Date('2024-02-01'),
-      description: 'Grupo dos moradores da Rua das Flores para avisos e ajuda mútua',
-      stats: { views: 580, chatsStarted: 234, messages: 2100 },
-      reported: false,
-    },
-  ]);
+  const [pins, setPins] = useState<Pin[]>([]);
 
-  const handlePinClick = (pin: Pin) => {
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(firebaseAuth, (user) => {
+      if (user) {
+        setIsLoggedIn(true);
+        setCurrentUser({
+          id: user.uid,
+          name: user.displayName || user.email || 'Usuário',
+          email: user.email,
+          type: 'user',
+          points: 0,
+          level: 1,
+        });
+      } else {
+        setIsLoggedIn(false);
+        setCurrentUser(null);
+      }
+    });
+
+    const pinsCollection = collection(firestore, 'pins');
+
+    const unsubscribe = onSnapshot(
+      pinsCollection,
+      (snapshot) => {
+        const fetchedPins: Pin[] = snapshot.docs.map((docSnapshot) => {
+          const data = docSnapshot.data() as any;
+          const createdAtValue = data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt ?? Date.now());
+
+          return {
+            id: docSnapshot.id,
+            type: data.type,
+            name: data.name,
+            lat: data.lat,
+            lng: data.lng,
+            address: data.address,
+            createdBy: data.createdBy,
+            createdAt: createdAtValue,
+            avatar: data.avatar,
+            description: data.description,
+            businessInfo: data.businessInfo,
+            stats: data.stats ?? { views: 0, chatsStarted: 0, messages: 0 },
+            reported: Boolean(data.reported),
+            moderationStatus: data.moderationStatus,
+          };
+        });
+
+        setPins(fetchedPins);
+
+        const fetchedIds = new Set(fetchedPins.map((pin) => pin.id));
+        Object.entries(statsUnsubRef.current).forEach(([id, cleanup]) => {
+          if (!fetchedIds.has(id)) {
+            cleanup();
+            delete statsUnsubRef.current[id];
+          }
+        });
+
+        fetchedPins.forEach((pin) => {
+          if (statsUnsubRef.current[pin.id]) return;
+
+          const statsRef = ref(realtimeDb, `pinStats/${pin.id}`);
+          const unsubscribeStats = onValue(statsRef, (statsSnapshot) => {
+            const liveStats = statsSnapshot.val();
+            if (!liveStats) return;
+
+            setPins((currentPins) =>
+              currentPins.map((p) =>
+                p.id === pin.id
+                  ? { ...p, stats: { ...p.stats, ...liveStats } }
+                  : p
+              )
+            );
+          });
+
+          statsUnsubRef.current[pin.id] = unsubscribeStats;
+        });
+      },
+      (error) => {
+        console.error('Error loading pins from Firestore', error);
+      }
+    );
+
+    return () => {
+      unsubscribeAuth();
+      unsubscribe();
+      Object.values(statsUnsubRef.current).forEach((cleanup) => cleanup());
+      statsUnsubRef.current = {};
+    };
+  }, []);
+
+  const handlePinClick = async (pin: Pin) => {
     setSelectedPin(pin);
     
     // Update view count
-    setPins(pins.map(p => 
-      p.id === pin.id 
-        ? { ...p, stats: { ...p.stats, views: p.stats.views + 1 } }
-        : p
-    ));
+    try {
+      const pinRef = doc(firestore, 'pins', pin.id);
+      await updateDoc(pinRef, { 'stats.views': increment(1) });
+      await runTransaction(ref(realtimeDb, `pinStats/${pin.id}/views`), (current) => (current || 0) + 1);
+    } catch (error) {
+      console.error('Failed to increment views', error);
+    }
 
     // Check if user is the owner of this pin
     if (isLoggedIn && currentUser?.id === pin.createdBy) {
@@ -145,11 +185,14 @@ export default function App() {
   const handleStartChat = (interest?: { products: any[], services: any[] }) => {
     // Update chat started count
     if (selectedPin) {
-      setPins(pins.map(p => 
-        p.id === selectedPin.id 
-          ? { ...p, stats: { ...p.stats, chatsStarted: p.stats.chatsStarted + 1 } }
-          : p
-      ));
+      const pinRef = doc(firestore, 'pins', selectedPin.id);
+      updateDoc(pinRef, { 'stats.chatsStarted': increment(1) }).catch((error) => {
+        console.error('Failed to increment chat counter', error);
+      });
+
+      runTransaction(ref(realtimeDb, `pinStats/${selectedPin.id}/chatsStarted`), (current) => (current || 0) + 1).catch((error) => {
+        console.error('Failed to increment chat counter (RTDB)', error);
+      });
     }
 
     setIsPinDetailsOpen(false);
@@ -163,8 +206,17 @@ export default function App() {
   };
 
   const handleCreatePin = (pinData: Partial<Pin>) => {
-    const newPin: Pin = {
-      id: Date.now().toString(),
+    const sanitizedBusinessInfo =
+      pinData.type !== 'personal' && pinData.businessInfo
+        ? {
+            ...pinData.businessInfo,
+            products: (pinData.businessInfo.products || []).filter(Boolean),
+            services: (pinData.businessInfo.services || []).filter(Boolean),
+            categories: (pinData.businessInfo.categories || []).filter(Boolean),
+          }
+        : null;
+
+    const basePin = {
       type: pinData.type!,
       name: pinData.name!,
       lat: pinData.lat!,
@@ -173,30 +225,48 @@ export default function App() {
       createdBy: currentUser?.id || 'user',
       createdAt: new Date(),
       description: pinData.description,
-      businessInfo: pinData.businessInfo,
       stats: { views: 0, chatsStarted: 0, messages: 0 },
       reported: false,
     };
+
+    const newPin: Omit<Pin, 'id'> = sanitizedBusinessInfo
+      ? { ...basePin, businessInfo: sanitizedBusinessInfo }
+      : basePin;
     
-    setPins([...pins, newPin]);
-    setIsCreatePinOpen(false);
+    const firestorePayload = sanitizedBusinessInfo
+      ? { ...basePin, businessInfo: sanitizedBusinessInfo, createdAt: serverTimestamp() }
+      : { ...basePin, createdAt: serverTimestamp() };
+
+    addDoc(collection(firestore, 'pins'), firestorePayload)
+      .then((docRef) => {
+        const rtdbPayload = sanitizedBusinessInfo
+          ? { ...basePin, businessInfo: sanitizedBusinessInfo, createdAt: rtdbServerTimestamp() }
+          : { ...basePin, createdAt: rtdbServerTimestamp() };
+
+        // Primeiro cria o pino no RTDB para liberar permissões de pinStats
+        set(ref(realtimeDb, `pins/${docRef.id}`), rtdbPayload)
+          .then(() =>
+            set(ref(realtimeDb, `pinStats/${docRef.id}`), newPin.stats).catch((error) => {
+              console.error('Failed to seed stats in Realtime Database', error);
+            })
+          )
+          .catch((error) => {
+            console.error('Failed to create pin in Realtime Database', error);
+          });
+
+        setIsCreatePinOpen(false);
+      })
+      .catch((error) => {
+        console.error('Failed to create pin in Firestore', error);
+      });
   };
 
-  const handleLogin = () => {
-    setIsLoggedIn(true);
-    setCurrentUser({
-      id: 'farmacia_central', // Set to farmacia_central to test management
-      name: 'João Silva',
-      email: 'joao@example.com',
-      type: 'business',
-      points: 150,
-      level: 3,
-    });
-  };
+  const handleLogin = () => setIsAuthOpen(true);
 
   const handleLogout = () => {
-    setIsLoggedIn(false);
-    setCurrentUser(null);
+    signOut(firebaseAuth).catch((error) => {
+      console.error('Failed to logout', error);
+    });
   };
 
   return (
@@ -273,6 +343,7 @@ export default function App() {
               pin={selectedPin}
               onStartChat={handleStartChat}
               isLoggedIn={isLoggedIn}
+              onLogin={handleLogin}
             />
           )}
 
@@ -319,6 +390,12 @@ export default function App() {
                   : p
               ));
             }}
+          />
+
+          <AuthModal
+            isOpen={isAuthOpen}
+            onClose={() => setIsAuthOpen(false)}
+            onLoginSuccess={() => setIsAuthOpen(false)}
           />
         </>
       )}

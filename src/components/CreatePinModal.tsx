@@ -1,6 +1,6 @@
 import { X, MapPin, Search, Building2, User, Users } from 'lucide-react';
 import { Button } from './ui/button';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface CreatePinModalProps {
   isOpen: boolean;
@@ -26,8 +26,14 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
     products: '',
     services: '',
   });
-
-  if (!isOpen) return null;
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
+  const autocompleteServiceRef = useRef<google.maps.places.AutocompleteService | null>(null);
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
+  const [mapsError, setMapsError] = useState<string | null>(null);
+  const [predictions, setPredictions] = useState<{ placeId: string; mainText: string; secondaryText?: string }[]>([]);
+  const [isFetchingPredictions, setIsFetchingPredictions] = useState(false);
+  const sessionTokenRef = useRef<string>(crypto.randomUUID());
 
   const handleSubmit = () => {
     onCreate({
@@ -69,15 +75,113 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
   };
 
   // Simulate Google Places API search
-  const handleAddressSearch = () => {
-    if (searchAddress) {
-      setSelectedAddress({
-        address: searchAddress,
-        lat: -23.550520 + Math.random() * 0.01,
-        lng: -46.633308 + Math.random() * 0.01,
+  useEffect(() => {
+    if (!apiKey) {
+      setMapsError('Configure VITE_GOOGLE_MAPS_API_KEY com acesso ao Places API (New).');
+    }
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (!apiKey) return;
+    if (!searchAddress || searchAddress.length < 3) {
+      setPredictions([]);
+      return;
+    }
+
+    setIsFetchingPredictions(true);
+    const controller = new AbortController();
+
+    const fetchPredictions = async () => {
+      try {
+        const response = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': 'predictions.placeId,predictions.text',
+            'X-Goog-Session-Token': sessionTokenRef.current,
+          },
+          body: JSON.stringify({
+            input: searchAddress,
+            types: ['route', 'street_address'],
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Falha ao consultar Places API (New)');
+        }
+
+        const data = await response.json();
+        const parsed = (data?.predictions || []).map((p: any) => ({
+          placeId: p.placeId,
+          mainText: p.text?.primaryText || p.text?.text || '',
+          secondaryText: p.text?.secondaryText || '',
+        }));
+
+        setPredictions(parsed);
+        setMapsError(parsed.length === 0 ? 'Nenhum endereço encontrado. Refine a busca.' : null);
+      } catch (error: any) {
+        if (error.name !== 'AbortError') {
+          setMapsError(error.message || 'Erro ao buscar endereços.');
+          setPredictions([]);
+        }
+      } finally {
+        setIsFetchingPredictions(false);
+      }
+    };
+
+    const timeoutId = window.setTimeout(fetchPredictions, 300);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeoutId);
+    };
+  }, [apiKey, searchAddress]);
+
+  const handlePredictionSelect = async (prediction: { placeId: string; mainText: string; secondaryText?: string }) => {
+    if (!apiKey) return;
+    try {
+      const response = await fetch(`https://places.googleapis.com/v1/places/${prediction.placeId}`, {
+        method: 'GET',
+        headers: {
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'id,displayName,formattedAddress,location',
+          'X-Goog-Session-Token': sessionTokenRef.current,
+        },
       });
+      if (!response.ok) {
+        throw new Error('Não foi possível obter detalhes do endereço.');
+      }
+      const place = await response.json();
+      const lat = place?.location?.latitude;
+      const lng = place?.location?.longitude;
+      const address = place?.formattedAddress || place?.displayName?.text || searchAddress;
+
+      if (lat === undefined || lng === undefined) {
+        throw new Error('Endereço sem coordenadas.');
+      }
+
+      setSelectedAddress({ address, lat, lng });
+      setSearchAddress(address);
+      setPredictions([]);
+      setMapsError(null);
+
+      // renovar token após seleção
+      sessionTokenRef.current = crypto.randomUUID();
+    } catch (error: any) {
+      setMapsError(error.message || 'Erro ao obter detalhes do endereço.');
     }
   };
+
+  const handleManualSubmit = () => {
+    if (predictions.length > 0) {
+      handlePredictionSelect(predictions[0]);
+    } else if (searchAddress.length >= 3) {
+      setMapsError('Selecione uma sugestão da lista para validar o endereço.');
+    }
+  };
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
@@ -195,28 +299,67 @@ export function CreatePinModal({ isOpen, onClose, onCreate, currentUser }: Creat
             <div className="space-y-4">
               <h3 className="text-gray-900 mb-4">Encontre o endereço</h3>
               
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                <p className="text-sm text-blue-800">
-                  <MapPin className="w-4 h-4 inline mr-2" />
-                  A API do Google Places será integrada para busca de endereços com lat/lng
-                </p>
-              </div>
-
               <div className="flex gap-2">
                 <div className="flex-1 relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                   <input
                     type="text"
+                    ref={inputRef}
                     value={searchAddress}
                     onChange={(e) => setSearchAddress(e.target.value)}
                     placeholder="Digite o nome da rua..."
                     className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={mapsStatus === 'loading'}
                   />
                 </div>
-                <Button onClick={handleAddressSearch} className="bg-blue-600 hover:bg-blue-700">
+                <Button
+                  className="bg-blue-600 hover:bg-blue-700"
+                  type="button"
+                  onClick={handleManualSubmit}
+                  disabled={mapsStatus !== 'ready'}
+                >
                   Buscar
                 </Button>
               </div>
+
+              {mapsStatus !== 'ready' && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+                  Carregando Google Places...
+                </div>
+              )}
+
+              {mapsError && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                  {mapsError}
+                </div>
+              )}
+
+              {isFetchingPredictions && searchAddress.length >= 3 && (
+                <div className="text-xs text-gray-500 mt-2">Buscando sugestões...</div>
+              )}
+
+              {predictions.length > 0 && (
+                <div className="mt-3 border border-gray-200 rounded-lg divide-y max-h-48 overflow-y-auto bg-white shadow-sm">
+                  {predictions.map((prediction) => (
+                    <button
+                      key={prediction.place_id}
+                      type="button"
+                      className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-start gap-3"
+                      onClick={() => handlePredictionSelect(prediction)}
+                    >
+                      <MapPin className="w-5 h-5 text-green-600 mt-0.5" />
+                      <div>
+                        <div className="text-gray-900 text-sm font-medium">
+                          {prediction.structured_formatting.main_text}
+                        </div>
+                        <div className="text-xs text-gray-600">
+                          {prediction.structured_formatting.secondary_text}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {selectedAddress && (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4">

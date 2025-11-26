@@ -1,7 +1,8 @@
-import { Plus, Search, Filter, MapPin as MapPinIcon } from 'lucide-react';
-import { Button } from './ui/button';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Search, Filter } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Pin } from '../App';
+import { useGoogleMaps } from '../hooks/useGoogleMaps';
 
 interface MapViewProps {
   pins: Pin[];
@@ -10,46 +11,145 @@ interface MapViewProps {
   isLoggedIn: boolean;
 }
 
+const DEFAULT_CENTER = { lat: -23.55052, lng: -46.633308 };
+const RADIUS_KM = 8;
+
 export function MapView({ pins, onPinClick, onCreatePin, isLoggedIn }: MapViewProps) {
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const userMarkerRef = useRef<google.maps.Marker | null>(null);
+  const userCircleRef = useRef<google.maps.Circle | null>(null);
+  const pinMarkersRef = useRef<google.maps.Marker[]>([]);
+
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [geoError, setGeoError] = useState<string | null>(null);
+
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
+  const mapStatus = useGoogleMaps(apiKey);
+
+  const nearbyPins = useMemo(() => {
+    if (!userLocation) return pins;
+    return pins.filter((pin) => distanceInKm(userLocation, { lat: pin.lat, lng: pin.lng }) <= RADIUS_KM);
+  }, [pins, userLocation]);
+
+  useEffect(() => {
+    if (mapStatus !== 'ready' || mapRef.current || !mapContainerRef.current) return;
+
+    mapRef.current = new google.maps.Map(mapContainerRef.current, {
+      center: DEFAULT_CENTER,
+      zoom: 13,
+      disableDefaultUI: true,
+      zoomControl: true,
+      streetViewControl: false,
+      mapTypeControl: false,
+    });
+  }, [mapStatus]);
+
+  useEffect(() => {
+    if (mapStatus !== 'ready') return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const coords = { lat: position.coords.latitude, lng: position.coords.longitude };
+        setUserLocation(coords);
+        setGeoError(null);
+      },
+      (error) => {
+        setGeoError(error.message || 'Não foi possível obter sua localização.');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 }
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [mapStatus]);
+
+  useEffect(() => {
+    if (!mapRef.current || !userLocation || mapStatus !== 'ready') return;
+
+    mapRef.current.setCenter(userLocation);
+    mapRef.current.setZoom(15);
+
+    if (!userMarkerRef.current) {
+      userMarkerRef.current = new google.maps.Marker({
+        map: mapRef.current,
+        position: userLocation,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#2563eb',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: 3,
+        },
+        title: 'Você está aqui',
+      });
+    } else {
+      userMarkerRef.current.setPosition(userLocation);
+    }
+
+    if (!userCircleRef.current) {
+      userCircleRef.current = new google.maps.Circle({
+        map: mapRef.current,
+        center: userLocation,
+        radius: RADIUS_KM * 1000,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.08,
+        strokeColor: '#2563eb',
+        strokeOpacity: 0.5,
+        strokeWeight: 1,
+      });
+    } else {
+      userCircleRef.current.setCenter(userLocation);
+    }
+  }, [userLocation, mapStatus]);
+
+  useEffect(() => {
+    if (!mapRef.current || mapStatus !== 'ready') return;
+
+    pinMarkersRef.current.forEach((marker) => marker.setMap(null));
+    pinMarkersRef.current = [];
+
+    nearbyPins.forEach((pin) => {
+      const marker = new google.maps.Marker({
+        map: mapRef.current!,
+        position: { lat: pin.lat, lng: pin.lng },
+        title: pin.name,
+        icon: {
+          path: 'M12 2C8.14 2 5 5.14 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.86-3.14-7-7-7z',
+          fillColor: pin.type === 'business' ? '#3b82f6' : pin.type === 'public' ? '#22c55e' : '#a855f7',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: 2,
+          scale: 1.2,
+          anchor: new google.maps.Point(12, 24),
+        },
+      });
+
+      marker.addListener('click', () => onPinClick(pin));
+      pinMarkersRef.current.push(marker);
+    });
+
+    return () => {
+      pinMarkersRef.current.forEach((marker) => marker.setMap(null));
+      pinMarkersRef.current = [];
+    };
+  }, [nearbyPins, onPinClick, mapStatus]);
+
   return (
     <div className="relative w-full h-full">
-      {/* Map Container - Simulated Google Maps */}
-      <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-green-50">
-        {/* Grid pattern to simulate map */}
-        <div
-          className="absolute inset-0"
-          style={{
-            backgroundImage: `linear-gradient(to right, rgba(229, 231, 235, 0.3) 1px, transparent 1px),
-                              linear-gradient(to bottom, rgba(229, 231, 235, 0.3) 1px, transparent 1px)`,
-            backgroundSize: '40px 40px',
-          }}
-        ></div>
+      <div ref={mapContainerRef} className="absolute inset-0 rounded-2xl overflow-hidden bg-gray-100" />
 
-        {/* Map Label */}
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border border-gray-200">
-          <p className="text-sm text-gray-600">
-            <MapPinIcon className="w-4 h-4 inline mr-2" />
-            Google Maps será integrado aqui via API
-          </p>
+      {mapStatus === 'error' && (
+        <div className="absolute inset-0 flex items-center justify-center bg-white/90 text-sm text-red-600">
+          Configure a chave `VITE_GOOGLE_MAPS_API_KEY` para carregar o mapa.
         </div>
+      )}
 
-        {/* Render Pins */}
-        {pins.map((pin) => (
-          <MapPin key={pin.id} pin={pin} onClick={() => onPinClick(pin)} />
-        ))}
-
-        {/* Center "You are here" marker */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-          <div className="relative">
-            <div className="w-16 h-16 rounded-full bg-blue-600 border-4 border-white shadow-xl flex items-center justify-center animate-pulse">
-              <MapPinIcon className="w-8 h-8 text-white fill-white" />
-            </div>
-            <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 whitespace-nowrap bg-gray-900 text-white px-3 py-1 rounded-full text-xs">
-              Você está aqui
-            </div>
-          </div>
+      {geoError && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white shadow-md rounded-full px-4 py-2 text-xs text-gray-700">
+          {geoError}
         </div>
-      </div>
+      )}
 
       {/* Search Bar */}
       <div className="absolute top-4 left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-full md:max-w-2xl z-10">
@@ -108,57 +208,30 @@ export function MapView({ pins, onPinClick, onCreatePin, isLoggedIn }: MapViewPr
             <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
             <span className="text-xs text-gray-700">Pessoas/Grupos</span>
           </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 border border-blue-500/60 rounded-full"></div>
+            <span className="text-xs text-gray-700">Raio {RADIUS_KM} km</span>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function MapPin({ pin, onClick }: { pin: Pin; onClick: () => void }) {
-  // Calculate position based on pin index (simulated positioning)
-  const positions = [
-    { top: '30%', left: '35%' },
-    { top: '40%', left: '65%' },
-    { top: '60%', left: '40%' },
-    { top: '35%', left: '75%' },
-    { top: '70%', left: '30%' },
-  ];
+function distanceInKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
 
-  const position = positions[parseInt(pin.id) % positions.length];
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLon = Math.sin(dLon / 2);
+  const c = sinDLat * sinDLat + sinDLon * sinDLon * Math.cos(lat1) * Math.cos(lat2);
+  const d = 2 * Math.atan2(Math.sqrt(c), Math.sqrt(1 - c));
+  return R * d;
+}
 
-  const colorClass =
-    pin.type === 'business'
-      ? 'bg-blue-500'
-      : pin.type === 'public'
-      ? 'bg-green-500'
-      : 'bg-purple-500';
-
-  return (
-    <div
-      className="absolute group cursor-pointer z-10"
-      style={{ top: position.top, left: position.left, transform: 'translate(-50%, -100%)' }}
-      onClick={onClick}
-    >
-      {/* Pin Shape */}
-      <div
-        className={`w-10 h-10 ${colorClass} rounded-full border-2 border-white shadow-lg hover:scale-110 transition-transform relative`}
-      >
-        {/* Stats Badge */}
-        {pin.stats.chatsStarted > 0 && (
-          <div className="absolute -top-2 -right-2 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
-            {pin.stats.chatsStarted > 99 ? '99+' : pin.stats.chatsStarted}
-          </div>
-        )}
-      </div>
-
-      {/* Tooltip */}
-      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-900 text-white px-3 py-2 rounded-lg text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-        <div className="font-medium">{pin.name}</div>
-        <div className="text-gray-300 text-xs">{pin.address}</div>
-        {pin.reported && (
-          <div className="text-yellow-400 text-xs mt-1">⚠ Em moderação</div>
-        )}
-      </div>
-    </div>
-  );
+function toRad(deg: number) {
+  return (deg * Math.PI) / 180;
 }

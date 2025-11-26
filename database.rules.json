@@ -1,0 +1,29 @@
+{
+  "rules": {
+    ".read": true,
+    "pins": {
+      ".read": true,
+      ".indexOn": ["createdBy", "type"],
+      "$pinId": {
+        ".write": "auth != null",
+        "type": { ".validate": "newData.isString()" },
+        "name": { ".validate": "newData.isString() && newData.val().length > 0" },
+        "lat": { ".validate": "newData.isNumber()" },
+        "lng": { ".validate": "newData.isNumber()" },
+        "address": { ".validate": "newData.isString()" },
+        "createdBy": { ".validate": "auth != null && newData.isString()" },
+        "stats": {
+          ".validate": "newData.hasChildren(['views','chatsStarted','messages']) && newData.child('views').isNumber() && newData.child('chatsStarted').isNumber() && newData.child('messages').isNumber()"
+        },
+        "$other": { ".validate": true }
+      }
+    },
+    "pinStats": {
+      ".read": true,
+      "$pinId": {
+        ".write": "root.child('pins').child($pinId).exists()",
+        ".validate": "newData.isNumber() || (newData.hasChildren(['views','chatsStarted','messages']) && newData.child('views').isNumber() && newData.child('chatsStarted').isNumber() && newData.child('messages').isNumber())"
+      }
+    }
+  }
+}
